@@ -2,12 +2,15 @@ package wallet
 
 import (
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"math/big"
 	"testing"
 	"time"
 
 	"github.com/ElrondNetwork/elrond-go/data/transaction"
 	"github.com/ElrondNetwork/elrond-go/integrationTests"
+	"github.com/ElrondNetwork/elrond-go/marshal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -68,7 +71,7 @@ func TestInterceptedTxWithSigningOverTxHash(t *testing.T) {
 		1000000000,
 		56000,
 		[]byte("test"),
-		integrationTests.ChainID,
+		[]byte("T"),
 		2,
 		1,
 	)
@@ -159,6 +162,15 @@ func testInterceptedTxFromFrontendGeneratedParams(
 		Options:   options,
 	}
 	tx.Value = big.NewInt(0).Set(frontendValue)
+
+	bbb, _ := tx.GetDataForSigning(integrationTests.TestAddressPubkeyConverter, &marshal.JsonMarshalizer{})
+
+	ftx := transaction.FrontendTransaction{}
+	_ = json.Unmarshal(bbb, &ftx)
+	ftx.Signature = frontendSignatureHex
+	bbbbb, _ := json.Marshal(ftx)
+	fmt.Println(string(bbbbb))
+
 	txHexHash, err = node.SendTransaction(tx)
 	require.Nil(t, err)
 

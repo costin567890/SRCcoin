@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"time"
 
 	logger "github.com/ElrondNetwork/elrond-go-logger"
 	"github.com/ElrondNetwork/elrond-go/config"
@@ -88,6 +89,7 @@ func main() {
 			return errRunner
 		}
 
+		time.Sleep(20 * time.Second)
 		return nodeRunner.Start()
 	}
 

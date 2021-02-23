@@ -15,6 +15,7 @@ import (
 	"time"
 
 	logger "github.com/ElrondNetwork/elrond-go-logger"
+	"github.com/ElrondNetwork/elrond-go/api/factory/ginwebserver"
 	"github.com/ElrondNetwork/elrond-go/cmd/node/factory"
 	"github.com/ElrondNetwork/elrond-go/cmd/node/metrics"
 	"github.com/ElrondNetwork/elrond-go/config"
@@ -163,7 +164,7 @@ func (nr *nodeRunner) startShufflingProcessLoop(
 		log.Debug("creating healthService")
 		healthService := nr.createHealthService(flagsConfig, managedDataComponents)
 
-		log.Trace("creating metrics")
+		log.Debug("creating metrics")
 		err = nr.createMetrics(managedCoreComponents, managedCryptoComponents, managedBootstrapComponents)
 		if err != nil {
 			return err
@@ -198,7 +199,7 @@ func (nr *nodeRunner) startShufflingProcessLoop(
 			return err
 		}
 
-		log.Trace("starting status pooling components")
+		log.Debug("starting status pooling components")
 		managedStatusComponents, err := nr.CreateManagedStatusComponents(
 			managedCoreComponents,
 			managedNetworkComponents,
@@ -223,7 +224,7 @@ func (nr *nodeRunner) startShufflingProcessLoop(
 			return err
 		}
 
-		log.Trace("creating process components")
+		log.Debug("creating process components")
 		managedProcessComponents, err := nr.CreateManagedProcessComponents(
 			managedCoreComponents,
 			managedCryptoComponents,
@@ -279,7 +280,7 @@ func (nr *nodeRunner) startShufflingProcessLoop(
 			return err
 		}
 
-		log.Trace("creating node structure")
+		log.Debug("creating node structure")
 		currentNode, err := CreateNode(
 			configs.GeneralConfig,
 			managedBootstrapComponents,
@@ -307,7 +308,8 @@ func (nr *nodeRunner) startShufflingProcessLoop(
 			)
 		}
 
-		ef, err := nr.createApiFacade(currentNode, gasScheduleNotifier)
+		log.Debug("creating api facade")
+		ef, httpServer, err := nr.createApiFacade(currentNode, gasScheduleNotifier)
 		if err != nil {
 			return err
 		}
@@ -316,7 +318,7 @@ func (nr *nodeRunner) startShufflingProcessLoop(
 		sigs := make(chan os.Signal, 1)
 		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 
-		err = waitForSignal(sigs, managedCoreComponents.ChanStopNodeProcess(), healthService, ef, currentNode, goRoutinesNumberStart)
+		err = waitForSignal(sigs, managedCoreComponents.ChanStopNodeProcess(), healthService, ef, httpServer, currentNode, goRoutinesNumberStart)
 		if err != nil {
 			break
 		}
@@ -324,7 +326,7 @@ func (nr *nodeRunner) startShufflingProcessLoop(
 	return nil
 }
 
-func (nr *nodeRunner) createApiFacade(currentNode *Node, gasScheduleNotifier core.GasScheduleNotifier) (closing.Closer, error) {
+func (nr *nodeRunner) createApiFacade(currentNode *Node, gasScheduleNotifier core.GasScheduleNotifier) (closing.Closer, closing.Closer, error) {
 	configs := nr.configs
 
 	log.Trace("creating api resolver structure")
@@ -351,7 +353,7 @@ func (nr *nodeRunner) createApiFacade(currentNode *Node, gasScheduleNotifier cor
 		configs.FlagsConfig.WorkingDir,
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	log.Trace("creating elrond node facade")
@@ -375,15 +377,32 @@ func (nr *nodeRunner) createApiFacade(currentNode *Node, gasScheduleNotifier cor
 
 	ef, err := facade.NewNodeFacade(argNodeFacade)
 	if err != nil {
-		return nil, fmt.Errorf("%w while creating NodeFacade", err)
+		return nil, nil, fmt.Errorf("%w while creating NodeFacade", err)
 	}
 
 	ef.SetSyncer(currentNode.coreComponents.SyncTimer())
 	ef.SetTpsBenchmark(currentNode.statusComponents.TpsBenchmark())
 
+	ginWebServerHandlerArgs := ginwebserver.GinWebServerHandlerArgs{
+		Facade:          ef,
+		ApiConfig:       *configs.ApiRoutesConfig,
+		AntiFloodConfig: configs.GeneralConfig.Antiflood.WebServer,
+	}
+	ginWebServerHandler, err := ginwebserver.NewGinWebServerHandler(ginWebServerHandlerArgs)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	log.Debug("before starting http server")
+	httpServer, err := ginWebServerHandler.CreateHttpServer()
+	if err != nil {
+		log.Debug("error starting http server")
+		return nil, nil, err
+	}
+	log.Debug("started http server")
+
 	log.Trace("starting background services")
-	ef.StartBackgroundServices()
-	return ef, nil
+	return ef, httpServer, nil
 }
 
 func (nr *nodeRunner) createMetrics(
@@ -536,6 +555,7 @@ func waitForSignal(
 	chanStopNodeProcess chan endProcess.ArgEndProcess,
 	healthService closing.Closer,
 	ef closing.Closer,
+	httpServer closing.Closer,
 	currentNode *Node,
 	goRoutinesNumberStart int,
 ) error {
@@ -553,7 +573,7 @@ func waitForSignal(
 
 	chanCloseComponents := make(chan struct{})
 	go func() {
-		closeAllComponents(healthService, ef, currentNode, chanCloseComponents)
+		closeAllComponents(healthService, ef, httpServer, currentNode, chanCloseComponents)
 	}()
 
 	select {
@@ -1072,6 +1092,7 @@ func (nr *nodeRunner) CreateManagedCryptoComponents(
 func closeAllComponents(
 	healthService io.Closer,
 	facade mainFactory.Closer,
+	httpServer mainFactory.Closer,
 	node *Node,
 	chanCloseComponents chan struct{},
 ) {
@@ -1081,6 +1102,9 @@ func closeAllComponents(
 
 	log.Debug("closing facade")
 	log.LogIfError(facade.Close())
+
+	log.Debug("closing http server")
+	log.LogIfError(httpServer.Close())
 
 	log.Debug("closing node")
 	log.LogIfError(node.Close())
